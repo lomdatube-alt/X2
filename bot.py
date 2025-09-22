@@ -1,7 +1,8 @@
-import requests
-import re
-import urllib3
 import os
+import re
+import requests
+import urllib3
+from flask import Flask, request
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -10,38 +11,36 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # === CONFIG ===
 API_URL = "https://demo-api-0upx.onrender.com/demo?term={num}"
-BOT_TOKEN = os.getenv("BOT_TOKEN")   # Token from Render Environment Variables
+BOT_TOKEN = os.getenv("BOT_TOKEN")   # set this in Render Environment Variables
+APP_URL = os.getenv("APP_URL")       # e.g. https://your-app.onrender.com
+PORT = int(os.environ.get("PORT", 10000))
 
 # Multiple owners
-OWNER_CHAT_IDS = [1362919387, 859230426]   # replace with your IDs
+OWNER_CHAT_IDS = [1362919387, 859230426]   # replace with real IDs
 OWNER_USERNAMES = ["@XM5XUM", "@VOFAAMIR"]
 
 # === User Data ===
 user_credits = {}       # {chatid: credits}
-banned_users = {}       # {chatid: "reason" or "Banned"}
+banned_users = {}       # {chatid: reason or "Banned"}
 
-# === Helper function ===
+# === Helper ===
 def is_owner(chat_id):
     return chat_id in OWNER_CHAT_IDS
 
-# === API Request ===
+# === API Fetch ===
 def fetch_number_info(number):
     try:
         url = API_URL.format(num=number)
         res = requests.get(url, timeout=10, verify=False)
-
         if res.status_code != 200:
             return None
-
         data = res.json()
-
         if isinstance(data, dict):
             if "data" in data and isinstance(data["data"], list):
                 return data["data"]
             return [data]
         if isinstance(data, list):
             return data
-
         return None
     except Exception:
         return None
@@ -78,14 +77,12 @@ def format_results(data):
         )
     return "\n\n".join(results)
 
-# === Commands ===
+# === Handlers ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
-
     if chat_id in banned_users and not is_owner(chat_id):
         await update.message.reply_text("⛔ You are banned. Contact the owner.")
         return
-
     if is_owner(chat_id):
         await update.message.reply_text("👑 Welcome back, Owner! Unlimited access.")
     else:
@@ -100,23 +97,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
-
     if chat_id in banned_users and not is_owner(chat_id):
         await update.message.reply_text("⛔ You are banned. Contact the owner.")
         return
-
     number = update.message.text.strip()
     if not number.isdigit():
         await update.message.reply_text("❌ Please send a valid number.")
         return
-
     if not is_owner(chat_id):
         if user_credits.get(chat_id, 0) <= 0:
             await update.message.reply_text(
                 f"🚫 You have 0 credits.\n💳 Contact {', '.join(OWNER_USERNAMES)} to purchase."
             )
             return
-
     results = fetch_number_info(number)
     if results:
         if not is_owner(chat_id):
@@ -137,10 +130,7 @@ async def add_credit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_id = int(context.args[0])
         amount = int(context.args[1])
         user_credits[target_id] = user_credits.get(target_id, 0) + amount
-        await update.message.reply_text(
-            f"✅ Added {amount} credits to `{target_id}`.\nBalance: {user_credits[target_id]}",
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text(f"✅ Added {amount} credits to `{target_id}`.\nBalance: {user_credits[target_id]}", parse_mode="Markdown")
     except:
         await update.message.reply_text("⚠️ Invalid arguments.")
 
@@ -155,10 +145,7 @@ async def remove_credit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_id = int(context.args[0])
         amount = int(context.args[1])
         user_credits[target_id] = max(0, user_credits.get(target_id, 0) - amount)
-        await update.message.reply_text(
-            f"❌ Removed {amount} credits from `{target_id}`.\nBalance: {user_credits[target_id]}",
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text(f"❌ Removed {amount} credits from `{target_id}`.\nBalance: {user_credits[target_id]}", parse_mode="Markdown")
     except:
         await update.message.reply_text("⚠️ Invalid arguments.")
 
@@ -214,7 +201,7 @@ async def unban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         await update.message.reply_text("⚠️ Invalid chatid.")
 
-# === User & Banned Lists ===
+# === Lists ===
 async def user_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.message.chat_id):
         await update.message.reply_text("🚫 Only owners can view user list.")
@@ -263,25 +250,47 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     await update.message.reply_text(commands, parse_mode="Markdown")
 
-# === Run Bot ===
+# === Flask App for Webhook ===
+flask_app = Flask(__name__)
+application = None
+
+@flask_app.route('/')
+def home():
+    return "🤖 Bot is running!"
+
+@flask_app.route(f'/{BOT_TOKEN}', methods=['POST'])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), application.bot)
+    application.update_queue.put_nowait(update)
+    return "OK"
+
 def main():
-    if not BOT_TOKEN:
-        print("❌ BOT_TOKEN not set. Please add it in Render Environment Variables.")
+    global application
+    if not BOT_TOKEN or not APP_URL:
+        print("❌ BOT_TOKEN or APP_URL not set in environment variables.")
         return
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("add", add_credit))
-    app.add_handler(CommandHandler("remove", remove_credit))
-    app.add_handler(CommandHandler("check", check_credit))
-    app.add_handler(CommandHandler("credits", my_credits))
-    app.add_handler(CommandHandler("ban", ban_user))
-    app.add_handler(CommandHandler("unban", unban_user))
-    app.add_handler(CommandHandler("ulist", user_list))
-    app.add_handler(CommandHandler("blist", banned_list))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("🤖 Bot is running...")
-    app.run_polling()
+
+    application = Application.builder().token(BOT_TOKEN).build()
+
+    # Add handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("add", add_credit))
+    application.add_handler(CommandHandler("remove", remove_credit))
+    application.add_handler(CommandHandler("check", check_credit))
+    application.add_handler(CommandHandler("credits", my_credits))
+    application.add_handler(CommandHandler("ban", ban_user))
+    application.add_handler(CommandHandler("unban", unban_user))
+    application.add_handler(CommandHandler("ulist", user_list))
+    application.add_handler(CommandHandler("blist", banned_list))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # Set webhook
+    webhook_url = f"{APP_URL}/{BOT_TOKEN}"
+    application.bot.set_webhook(url=webhook_url)
+    print(f"✅ Webhook set: {webhook_url}")
+
+    flask_app.run(host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":
     main()
